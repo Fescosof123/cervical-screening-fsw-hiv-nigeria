@@ -184,7 +184,17 @@ b = lg2.params[fp].values; v = np.diag(lg2.cov_params().loc[fp, fp].values)
 w = 1 / v; bw = (w * b).sum() / w.sum(); Q = (w * (b - bw) ** 2).sum(); k = len(b)
 tau2 = max(0, (Q - (k - 1)) / (w.sum() - (w ** 2).sum() / w.sum()))
 mor = np.exp(np.sqrt(2 * tau2) * 0.6745); icc = tau2 / (tau2 + np.pi ** 2 / 3)
-say(f"\nBetween-facility variance (adjusted, log-odds scale): tau2 = {tau2:.3f}; MOR = {mor:.2f}; ICC = {icc:.3f}; Q = {Q:.0f} on {k-1} df")
+tau2_w, mor_w, icc_w = tau2, mor, icc
+say(f"\nBetween-facility variance (adjusted, log-odds scale), inverse-variance weighted method of moments: tau2 = {tau2_w:.3f}; MOR = {mor_w:.2f}; ICC = {icc_w:.3f}; Q = {Q:.0f} on {k-1} df")
+# Unweighted method of moments: variance of the adjusted facility log odds minus their mean sampling variance.
+# The weighted estimate gives little weight to facilities with few screenings, which pulls the variance down, so the unweighted estimate is reported.
+tau2 = max(0, b.var(ddof=1) - v.mean()); mor = np.exp(np.sqrt(2 * tau2) * 0.6745); icc = tau2 / (tau2 + np.pi ** 2 / 3)
+say(f"Between-facility variance, unweighted method of moments (reported): tau2 = {tau2:.3f}; MOR = {mor:.2f}; ICC = {icc:.3f}")
+sd_ = f.groupby("art_status_detail").screened.agg(["size", "sum"]); sd_["pct"] = (100 * sd_["sum"] / sd_["size"]).round(1)
+say("\nCoverage by detailed ART status:\n", sd_.to_string())
+_sc = f[f.screened == 1]; _lag = (_sc[COL["scr"]] - _sc[COL["art"]]).dt.days / 365.25
+say(f"Years from ART start to the screening on record: median {_lag.median():.1f} (IQR {_lag.quantile(.25):.1f} to {_lag.quantile(.75):.1f}); screened within a year of ART start: {int((_lag.between(0, 1, inclusive='left')).sum())} = {100*(_lag.between(0, 1, inclusive='left')).mean():.1f}%; screened before ART start: {int((_lag < 0).sum())}")
+
 # adjusted (standardised) facility coverage: predict everyone as if at each facility
 std = []
 for fa in sorted(f.facility.unique()):
@@ -262,14 +272,19 @@ if len(sys.argv) > 3:
     say("\nFOLLOW-UP EXTRACT: records", len(r2), "| latest pickup", r2["Last Pickup Date (yyyy-mm-dd)"].max().date(),
         "| latest screening date", pd.to_datetime(r2[COL["scr"]], errors="coerce").max().date(),
         "| target group blank", int(r2["Target group"].isna().sum()))
-    k2 = r2[["Patient ID", COL["scr"], COL["res"], COL["tx"], "Current ART Status"]].drop_duplicates("Patient ID").rename(columns={"Current ART Status": "status_26"})
-    mm = f[["Patient ID", "state", COL["scr"], COL["res"]]].merge(k2, on="Patient ID", how="left", suffixes=("_24", "_26"), indicator=True)
+    say("Duplicate client identifiers in the later extract:", int(r2["Patient ID"].duplicated().sum()))
+    k2 = r2[["Patient ID", COL["scr"], COL["res"], COL["tx"], "Current ART Status", "Facility Name", COL["art"]]].drop_duplicates("Patient ID").rename(columns={"Current ART Status": "status_26", "Facility Name": "fac_26", COL["art"]: "art_26"})
+    k2[COL["scr"]] = pd.to_datetime(k2[COL["scr"]], errors="coerce"); k2["art_26"] = pd.to_datetime(k2["art_26"], errors="coerce")
+    mm = f[["Patient ID", "state", "facility", COL["art"], COL["scr"], COL["res"]]].merge(k2, on="Patient ID", how="left", suffixes=("_24", "_26"), indicator=True)
     bo = mm[mm._merge == "both"]; un = mm[mm._merge == "left_only"]
     say(f"Matched by client identifier: {len(bo)}/{len(mm)} = {100*len(bo)/len(mm):.1f}%; unmatched {len(un)}, by state:", un.state.value_counts().to_dict())
+    say(f"Matched records with the same ART start date in both extracts: {100*(bo[COL['art']] == bo.art_26).mean():.1f}%; same facility name: {100*(bo.facility.astype(str).str.strip() == bo.fac_26.astype(str).str.strip()).mean():.1f}%")
     ms = bo[bo[COL["scr"] + "_24"].notna() & bo[COL["res"] + "_24"].isna()]
+    same = ms[COL["scr"] + "_24"] == ms[COL["scr"] + "_26"]
+    say(f"Of these, screening date unchanged in the later extract: {int(same.sum())} = {100*same.mean():.1f}%; changed {int((~same).sum())}; among unchanged, still no result: {int(ms[same][COL['res'] + '_26'].isna().sum())} = {100*ms[same][COL['res'] + '_26'].isna().mean():.1f}%")
     still = int(ms[COL["res"] + "_26"].isna().sum())
     say(f"Screened with no result in 2024, matched: {len(ms)}; still no result: {still} = {100*still/len(ms):.1f}%; results since entered:", ms[COL["res"] + "_26"].value_counts().to_dict())
-    act26 = int((ms.status_26 == "Active").sum())
+    act26 = int(ms.status_26.isin(["Active", "Active Restart"]).sum())
     say(f"Of these {len(ms)} women, active on ART in the later extract: {act26} = {100*act26/len(ms):.1f}%")
     ab2 = bo[bo[COL["res"] + "_24"].isin(["Positive", "Suspicious for cancer"])]
     say(f"Abnormal in 2024, matched: {len(ab2)}; result in later extract:", ab2[COL["res"] + "_26"].value_counts(dropna=False).to_dict(), "| with treatment date:", int(ab2[COL["tx"]].notna().sum()))
@@ -277,7 +292,8 @@ if len(sys.argv) > 3:
     say(f"Unscreened in 2024, matched: {len(ns2)}; with a screening date in later extract: {int(ns2[COL['scr'] + '_26'].notna().sum())}")
     followup = pd.DataFrame([["Women in the analysis", len(mm)], ["Matched to the later extract", len(bo)], ["Not matched", len(un)],
         ["Not matched, in Jigawa or Yobe", int(un.state.isin(["Jigawa", "Yobe"]).sum())],
-        ["Screened with no result in 2024 (matched)", len(ms)], ["Of these, active on ART in the later extract", act26], ["Still no result in the later extract", still],
+        ["Screened with no result in 2024 (matched)", len(ms)], ["Of these, on ART in the later extract", act26], ["Still no result in the later extract", still],
+        ["Screening date unchanged in the later extract", int(same.sum())], ["Of those with an unchanged date, still no result", int(ms[same][COL["res"] + "_26"].isna().sum())],
         ["Result since entered: negative", int((ms[COL["res"] + "_26"] == "Negative").sum())],
         ["Result since entered: positive or suspicious for cancer", int(ms[COL["res"] + "_26"].isin(["Positive", "Suspicious for cancer"]).sum())],
         ["Abnormal result in 2024 (matched)", len(ab2)], ["With a treatment date in the later extract", int(ab2[COL["tx"]].notna().sum())],
@@ -304,14 +320,17 @@ ax.axvline(100 * K / N, ls="--", color="grey", lw=1)
 ax.text(100 * K / N + 1, len(fo) - 0.45, f"All facilities {100*K/N:.1f}%", fontsize=8, color="0.3")
 ax.set_xlabel("Women with a documented cervical screening (%)"); ax.set_xlim(0, 80)
 ax.set_title("A", loc="left", fontweight="bold")
-xs = trend.Year.astype(str)
+xs = trend.Year.astype(str).where(trend.Year != trend.Year.max(), trend.Year.astype(str) + "*")
+import matplotlib.ticker as mticker
 a1.bar(xs, trend["Women screened in year"], color="#0072B2", edgecolor="black", linewidth=0.6)
 for x, yv in zip(xs, trend["Women screened in year"]): a1.text(x, yv + 120, f"{yv:,}", ha="center", fontsize=8)
-a1.set_ylabel("Women screened in the year"); a1.set_ylim(0, 7200); a1.set_title("B", loc="left", fontweight="bold")
+a1.set_ylabel("Women screened in the year"); a1.set_ylim(0, 7200); a1.set_title("B", loc="left", fontweight="bold"); a1.set_xlabel("Calendar year (*to November 6, 2024)")
+a1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v_, _p: f"{int(v_):,}"))
 a2.plot(xs, trend["Cumulative coverage %"], "-o", color="#D55E00", lw=2, ms=6)
-for x, yv in zip(xs, trend["Cumulative coverage %"]): a2.text(x, yv + 2.2, f"{yv}%", ha="center", fontsize=8)
+for x, yv in zip(xs, trend["Cumulative coverage %"]): a2.text(x, yv + 3.0, f"{yv}%", ha="center", fontsize=8)
+a2.set_xlim(-0.4, len(xs) - 0.6)
 a2.set_ylabel("Cumulative coverage (%)"); a2.set_ylim(0, 40); a2.set_title("C", loc="left", fontweight="bold")
-a2.set_xlabel("Calendar year")
+a2.set_xlabel("Calendar year (*to November 6, 2024)")
 for a in (ax, a1, a2): a.spines[["top", "right"]].set_visible(False)
 for ext in ("jpg", "tif"):
     fig.savefig(f"{OUT}/Figure 1.{ext}", dpi=300, bbox_inches="tight", **({"pil_kwargs": {"compression": "tiff_lzw"}} if ext == "tif" else {}))
@@ -326,9 +345,9 @@ flow = pd.DataFrame([["Records in RADET extract (all key populations)", len(r)],
                      ["Abnormal result (positive or suspicious for cancer)", int(s.abnormal.sum())]], columns=["Step", "n"])
 say("\nFLOW\n", flow.to_string(index=False))
 with pd.ExcelWriter(f"{OUT}/analysis results.xlsx") as xw:
-    flow.to_excel(xw, "Flow", index=False); t1.to_excel(xw, "Table 1", index=False); t2.to_excel(xw, "Table 2", index=False)
-    t3.to_excel(xw, "Table 3", index=False); fac.to_excel(xw, "Facility coverage", index=False); trend.to_excel(xw, "Trend", index=False)
-    s1.to_excel(xw, "Sens 1 cluster SE", index=False); s2.to_excel(xw, "Sens 2 eligible", index=False); s3.to_excel(xw, "Sens 3 logistic", index=False)
-    facres.to_excel(xw, "Results by facility", index=False)
-    if followup is not None: followup.to_excel(xw, "Follow-up 2026", index=False)
+    flow.to_excel(xw, sheet_name="Flow", index=False); t1.to_excel(xw, sheet_name="Table 1", index=False); t2.to_excel(xw, sheet_name="Table 2", index=False)
+    t3.to_excel(xw, sheet_name="Table 3", index=False); fac.to_excel(xw, sheet_name="Facility coverage", index=False); trend.to_excel(xw, sheet_name="Trend", index=False)
+    s1.to_excel(xw, sheet_name="Sens 1 cluster SE", index=False); s2.to_excel(xw, sheet_name="Sens 2 eligible", index=False); s3.to_excel(xw, sheet_name="Sens 3 logistic", index=False)
+    facres.to_excel(xw, sheet_name="Results by facility", index=False)
+    if followup is not None: followup.to_excel(xw, sheet_name="Follow-up 2026", index=False)
 log.close()

@@ -16,6 +16,8 @@ The third argument is optional and runs the follow-up check of missing results a
 
 Requirements: Python 3.13, pandas 3.0, statsmodels 0.15, scipy 1.18, matplotlib 3.11, openpyxl.
 
+Note on numbering: in the results workbook and log, "Table 2" is the regression table (Table 3 in the article) and "Table 3" is the table of results by year, method and state (Table 2 in the article).
+
 ## Data
 
 The data are not included. They belong to the programme and contain sensitive information on a key population. De-identified data may be made available by the corresponding author on reasonable request and with the permission of the programme.
